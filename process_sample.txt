@@ -1,0 +1,331 @@
+  Serial Port & Modem 클라이언트 접속 판단 프로세스
+
+  1단계: 시스템 초기화 및 포트 모니터링
+
+  mbtask의 포트 모니터링 (mbtask/ports.c)
+
+  - load_ports(): ttyinfo.data에서 사용 가능한 포트 로드
+  - check_ports(): 1초마다 포트 상태 확인
+    - 잠금 파일(/var/lock/LCK..ttyXX) 검사
+    - stale lock 감지 (프로세스 사망 확인: kill(pid, 0))
+    - 가용 POTS/ISDN 라인 카운트
+
+  2단계: Modem 대기 상태 (mgetty 통합)
+
+  mgetty의 역할
+
+  - Serial port에서 modem의 RING 신호 대기
+  - 전화 수신 시 modem에 ATA(Answer) 명령 전송
+  - Modem 응답 대기:
+    - CONNECT 응답 수신 → 연결 성공
+    - CONNECT 9600, CONNECT 14400 등 속도 정보 포함
+    - CALLER_ID 정보 (지원하는 경우)
+
+  환경 변수 설정 (answer.c:63-67)
+
+  if ((q = getenv("CONNECT")) != NULL)
+      Syslog('+', "CONNECT %s", q);
+  if ((q = getenv("CALLER_ID")) != NULL)
+      if (strncmp(q, "none", 4))
+          Syslog('+', "CALLER  %s", q);
+
+  mgetty가 설정하는 환경 변수:
+  - CONNECT: 연결 속도 및 프로토콜 정보
+  - CALLER_ID: 발신자 전화번호 (지원 시)
+
+  3단계: mbcico 실행 및 TTY 감지 (answer.c)
+
+  TTY 디바이스 감지 (answer.c:74-84)
+
+  carrier = TRUE;  // 초기 carrier 플래그 설정
+  p = ttyname(0);  // stdin의 tty 이름 획득 (예: /dev/ttyS0)
+  if (p) {
+      q = strrchr(ttyname(0), '/');
+      if (q)
+          p = q + 1;  // "ttyS0" 추출
+      strncpy(history.tty, p, 6);
+      if (load_port(p))  // ttyinfo.data에서 포트 설정 로드
+          Syslog('d', "Port %s, modem %s", ttyinfo.tty, modem.modem);
+  }
+
+  4단계: Serial Port 설정 (openport.c)
+
+  Raw 모드 설정 - rawport() → tty_raw() (openport.c:211-221, 386-420)
+
+  Termios 설정:
+  tios.c_iflag = 0;              // 입력 플래그 초기화
+  tios.c_oflag = 0;              // 출력 플래그 초기화
+  tios.c_cflag &= ~(CSTOPB | PARENB | PARODD);  // Stop bit, Parity 제거
+  tios.c_cflag |= CS8 | CREAD | HUPCL | CLOCAL; // 8비트, 읽기, Hangup, Local
+  tios.c_lflag = 0;              // Line 플래그 초기화
+  tios.c_cc[VMIN] = 1;           // 최소 1바이트 읽기
+  tios.c_cc[VTIME] = 0;          // 타임아웃 없음
+
+  Carrier Detect 활성화 - nolocalport() (openport.c:200-207)
+
+  핵심 설정:
+  Tios.c_cflag &= ~CLOCAL;   // CLOCAL 비활성화 → Carrier 감지 활성화
+  Tios.c_cflag |= CRTSCTS;   // RTS/CTS 하드웨어 흐름 제어 활성화
+
+  - CLOCAL 비활성화: Modem의 DCD(Data Carrier Detect) 신호 모니터링
+  - CRTSCTS 활성화: RTS(Request To Send)/CTS(Clear To Send) 흐름 제어
+
+  시그널 핸들러 설정 (openport.c:46-69)
+
+  signal(SIGHUP, linedrop);   // Carrier loss 감지
+  signal(SIGPIPE, sigpipe);   // Broken pipe 감지
+  signal(SIGINT, interrupt);  // 인터럽트 처리
+
+  5단계: Carrier 감지 메커니즘
+
+  하드웨어 레벨: DCD(Data Carrier Detect) 신호
+
+  - Modem의 DCD 핀이 HIGH → 연결 활성
+  - DCD 핀이 LOW → 연결 끊김
+
+  소프트웨어 레벨: 3가지 감지 방법
+
+  방법 1: SIGHUP 시그널 (openport.c:46-51)
+
+  void linedrop(int sig) {
+      Syslog('+', "openport: Lost Carrier");
+      hanged_up = 1;  // 전역 플래그 설정
+  }
+  - CLOCAL 비활성화 상태에서 DCD가 LOW로 떨어지면 커널이 SIGHUP 전송
+
+  방법 2: select() + errno 확인 (ttyio.c:163-244)
+
+  rc = select(1, &readfds, &writefds, &exceptfds, &seltimer);
+
+  if (rc < 0) {
+      if (hanged_up) {
+          tty_status = STAT_HANGUP;
+          WriteError("tty_read: hanged_up flag");
+      }
+  }
+
+  rc = read(0, buf, size);
+  if (rc <= 0) {
+      if (hanged_up || (errno == EPIPE) || (errno == ECONNRESET)) {
+          tty_status = STAT_HANGUP;
+      }
+  }
+
+  방법 3: read/write 실패 감지
+
+  - errno == EPIPE: Broken pipe
+  - errno == ECONNRESET: Connection reset
+  - read() 반환값 0 또는 -1
+
+  6단계: 세션 타입 감지 (session.c)
+
+  프로토콜 자동 감지 - rx_define_type() (session.c:550-760)
+
+  State Machine 방식 프로토콜 감지:
+
+  [sendintro] → [settimer] → [waitchar] → [nextchar] → [checkemsi]
+       ↑______________|                        |
+                                              ↓
+                                           [getdat]
+
+  송신 시퀀스 (session.c:597-605)
+
+  if ((localoptions & NOEMSI) == 0) {
+      PUTSTR("**EMSI_REQA77E\r\021");  // EMSI 요청
+  }
+  PUTCHAR('\r');
+
+  수신 프로토콜 감지 (session.c:634-704)
+
+  1. TSYNC (FTS-0001):
+  case TSYNC:  // 0x2C
+      if (++maybeftsc > 1) {
+          session_type = SESSION_FTSC;
+          SM_SUCCESS;
+      }
+
+  2. YOOHOO:
+  case YOOHOO:  // ENQ (0x05)
+      if (++maybeyoohoo > 1) {
+          session_type = SESSION_YOOHOO;
+          SM_SUCCESS;
+      }
+
+  3. EMSI:
+  if (strncasecmp(ebuf, "EMSI_INQC816", 12) == 0) {
+      session_type = SESSION_EMSI;
+      data = xstrcpy("**EMSI_INQC816");
+      SM_SUCCESS;
+  }
+
+  4. EMSI_DAT (Extended):
+  else if (strncasecmp(ebuf, "EMSI_DAT", 8) == 0) {
+      // 데이터 크기 파싱 및 전체 패킷 수신
+      sscanf(ebuf+8, "%04x", &datasize);
+      session_type = SESSION_EMSI;
+  }
+
+  타이머 기반 재시도 (session.c:609-623)
+
+  - 60초 마스터 타이머: 전체 세션 타임아웃
+  - 20초 인터벌 타이머: intro 재전송 타이머
+  - 최대 6회 재시도 후 실패
+
+  7단계: 세션 처리 (session.c:123-363)
+
+  TCP/IP 연결 감지 (session.c:139-264)
+
+  if (getpeername(0, (struct sockaddr *)&peeraddr6, &addrlen) == 0) {
+      // TCP/IP 연결
+      session_flags |= SESSION_TCP;
+
+      if (tcp_mode == TCPMODE_IBN) {
+          Syslog('+', "Incoming IBN/TCP connection from %s", str);
+      } else if (tcp_mode == TCPMODE_IFC) {
+          Syslog('+', "Incoming IFC/TCP connection from %s", str);
+      }
+  }
+
+  프로토콜별 세션 핸들러 (session.c:306-319)
+
+  switch(session_type) {
+      case SESSION_FTSC:    rc = rx_ftsc(); break;
+      case SESSION_YOOHOO:  rc = rx_yoohoo(); break;
+      case SESSION_EMSI:    rc = rx_emsi(data); break;
+      case SESSION_BINKP:   rc = binkp(role); break;
+  }
+
+  8단계: 연결 종료 (dial.c:109-147)
+
+  Hangup 프로세스 - hangup()
+
+  1. Modem Hangup 명령 전송:
+  if (strlen(modem.hangup))
+      chat(modem.hangup, CFG.timeoutreset, FALSE, NULL);
+
+  2. DTR Drop (하드웨어 Hangup):
+  tty_local() → openport.c:424-454
+  cfsetispeed(&Tios, 0);   // 속도를 0으로 설정
+  cfsetospeed(&Tios, 0);
+  tcsetattr(0, TCSADRAIN, &Tios);  // DTR을 LOW로 drop
+
+  sleep(1);  // 1초 대기 (모뎀이 hangup 인식)
+
+  // 원래 속도로 복원
+  cfsetispeed(&Tios, ispeed);
+  cfsetospeed(&Tios, ospeed);
+
+  3. 히스토리 기록:
+  history.offline = (int)c_end;
+  history.online  = (int)c_start;
+  history.sent_bytes = sentbytes;
+  history.rcvd_bytes = rcvdbytes;
+  history.inbound = ~master;
+  fwrite(&history, sizeof(history), 1, fp);  // mailer.hist에 기록
+
+  9단계: 모뎀 통신 (Chat Script) (chat.c)
+
+  Chat 함수 구조
+
+  int chat(char *Send, int timeout, int aftermode, char *Phone) {
+      send_str(Send, Phone);      // 명령 전송
+      expect_str(timeout, aftermode, Phone);  // 응답 대기
+  }
+
+  모뎀 응답 대기 - expect_str() (chat.c:146-224)
+
+  감지하는 모뎀 응답들:
+
+  1. 오류 문자열 (연결 실패):
+  for (i = 0; i < 10; i++)
+      if (strlen(modem.error[i]))
+          if (strncmp(modem.error[i], inbuf, strlen(modem.error[i])) == 0) {
+              matched = TRUE;  // 실패
+          }
+  예: NO CARRIER, ERROR, BUSY, NO DIALTONE
+
+  2. 연결 문자열 (연결 성공):
+  for (i = 0; i < 20; i++)
+      if (strlen(modem.connect[i]))
+          if (strncmp(modem.connect[i], inbuf, strlen(modem.connect[i])) == 0) {
+              matched = TRUE;
+              smatch  = TRUE;  // 성공
+          }
+  예: CONNECT, CONNECT 9600, CONNECT 14400, CONNECT 28800
+
+  3. OK 문자열:
+  if (strncmp(modem.ok, inbuf, strlen(modem.ok)) == 0) {
+      matched = TRUE;
+      smatch  = TRUE;
+  }
+
+  전체 흐름도 요약
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. mbtask: 포트 모니터링 (/var/lock/LCK.. 확인)            │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 2. mgetty: Serial port 대기, RING 신호 수신                │
+  │    - Modem: ATA (Answer) 명령 전송                          │
+  │    - Modem: CONNECT 9600 응답                               │
+  │    - 환경변수 설정: CONNECT, CALLER_ID                      │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 3. mbcico 실행 (answer 모드)                               │
+  │    - ttyname(0): /dev/ttyS0 감지                           │
+  │    - load_port(): ttyinfo.data에서 포트 설정 로드          │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 4. Serial Port 설정                                         │
+  │    - rawport(): Raw 8N1 모드 설정                          │
+  │    - nolocalport(): CLOCAL 끄기, CRTSCTS 켜기              │
+  │    - signal(SIGHUP, linedrop): Carrier loss 핸들러 등록    │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 5. Carrier 감지 활성화                                      │
+  │    - DCD(Data Carrier Detect) 신호 모니터링                │
+  │    - SIGHUP 시그널로 carrier loss 감지                     │
+  │    - read/write errno로 EPIPE/ECONNRESET 확인              │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 6. 프로토콜 자동 감지 (rx_define_type)                     │
+  │    - "**EMSI_REQA77E\r" 전송                               │
+  │    - 수신 대기:                                             │
+  │      * TSYNC (0x2C) → SESSION_FTSC                         │
+  │      * YOOHOO (ENQ) → SESSION_YOOHOO                       │
+  │      * "EMSI_INQC816" → SESSION_EMSI                       │
+  │      * "ibn" → SESSION_BINKP                               │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 7. 세션 처리                                                │
+  │    - rx_ftsc() / rx_yoohoo() / rx_emsi() / binkp()        │
+  │    - 파일 전송 (ZMODEM, XMODEM, Hydra, Kermit)            │
+  └──────────────────────┬──────────────────────────────────────┘
+                         ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 8. 연결 종료 (hangup)                                       │
+  │    - Modem hangup 명령 전송                                 │
+  │    - DTR drop (속도 0 설정, 1초 대기)                      │
+  │    - 히스토리 기록 (mailer.hist)                           │
+  │    - 포트 잠금 해제                                         │
+  └─────────────────────────────────────────────────────────────┘
+
+  핵심 파일 위치
+
+  - mbcico/answer.c:53 - answer() 함수
+  - mbcico/openport.c:200 - nolocalport()
+  - mbcico/openport.c:46 - linedrop() 시그널 핸들러
+  - mbcico/ttyio.c:163 - tty_read() carrier 감지
+  - mbcico/session.c:550 - rx_define_type() 프로토콜 감지
+  - mbcico/dial.c:109 - hangup()
+  - mbcico/chat.c:146 - expect_str() 모뎀 응답 대기
+  - mbtask/ports.c:187 - check_ports() 포트 모니터링
+
+  이것이 MBSE BBS에서 serial port와 modem을 통한 클라이언트 접속을 판단하는 전체 프로세스입니다.
+

@@ -1,0 +1,400 @@
+===============================================================================
+MODEM SAMPLE 프로그램 개발 TODO
+===============================================================================
+프로젝트: Serial Port를 통한 외장 모뎀 테스트 프로그램
+참고 소스: ../mbse_source/ (MBSE BBS의 mbcico 모듈)
+===============================================================================
+
+[요구사항 요약]
+-------------------------------------------------------------------------------
+시리얼 포트 설정:
+- SERIAL_PORT="/dev/ttyUSB0"
+- BAUDRATE=9600
+- BIT_PARITY=NONE
+- BIT_DATA=8
+- BIT_STOP=1
+- FLOW=NONE
+
+모뎀 명령:
+- MODEM_INIT_COMMAND="ATZ; AT&F Q0 V1 X4 &C1 S7=60 S10=120 S30=5"
+- MODEM_AUTOANSWER_COMMAND="ATE0 S0=0"
+
+프로그램 동작:
+1. 시리얼 포트 초기화 (8N1, 9600bps)
+2. MODEM_INIT_COMMAND 전송 및 응답 출력
+3. 2초 대기
+4. MODEM_AUTOANSWER_COMMAND 전송 및 응답 출력
+5. 2초 대기 후 시리얼 포트 모니터링 시작
+6. "RING" 문자열 2회 감지 시 MODEM CONNECTION 시작
+7. 연결 후 10초 대기 후 "first\n\r" 전송
+8. 5초 대기 후 "second\n\r" 전송
+9. 모뎀 연결 해제
+
+===============================================================================
+[참고할 MBSE 소스 파일]
+===============================================================================
+
+핵심 참고 파일 (Tier 1):
+-------------------------
+1. mbcico/openport.h, openport.c ★★★ 가장 중요
+   - openport(port, speed): 포트 열기 및 termios 설정
+   - closeport(): 포트 닫기
+   - tty_raw(speed): raw 8N1 모드 설정
+   - tty_local(): DTR hangup 모드
+   - tty_cooked(): 원래 상태 복원
+
+2. mbcico/ttyio.h, ttyio.c
+   - tty_putc(c): 문자 전송
+   - tty_put(buf, size): 버퍼 전송
+   - tty_getc(timeout): 문자 수신
+   - tty_get(buf, size, timeout): 버퍼 수신
+   - tty_check(): 데이터 가용성 확인
+   - tty_flushin(), tty_flushout(): 버퍼 플러시
+   - 타이머 관련 함수들 (3개 타이머 지원)
+
+3. mbcico/dial.h, dial.c
+   - initmodem(): 모뎀 초기화 (AT 명령 전송)
+   - dialphone(phone): 전화 걸기
+   - hangup(): 연결 종료
+   - chat() 함수 사용 (expect/send 스크립트)
+
+4. mbcico/answer.h, answer.c
+   - answer(stype): 수신 연결 처리
+   - RING 신호 감지 로직 참고
+
+5. mbcico/chat.h, chat.c
+   - chat(init_str, timeout, echo, param): 모뎀 명령 실행 및 응답 대기
+
+===============================================================================
+[개발 TODO - 구현 단계]
+===============================================================================
+
+□ PHASE 1: 프로젝트 구조 설정
+   ├─ □ 1.1 Makefile 작성
+   │      - gcc 컴파일러 설정
+   │      - 링크 옵션 설정
+   │      - clean 타겟 추가
+   ├─ □ 1.2 헤더 파일 생성 (modem_sample.h)
+   │      - 필요한 시스템 헤더 포함
+   │      - 상수 정의
+   │      - 함수 프로토타입 선언
+   └─ □ 1.3 메인 소스 파일 생성 (modem_sample.c)
+
+□ PHASE 2: Serial Port 처리 모듈 (openport 기반)
+   ├─ □ 2.1 시리얼 포트 초기화 함수
+   │      참고: mbcico/openport.c의 openport(), tty_raw()
+   │      - open_serial_port(device, baudrate)
+   │      - termios 구조체 설정 (8N1, no flow control)
+   │      - 포트 잠금 처리 (선택사항)
+   │
+   ├─ □ 2.2 시리얼 포트 닫기 함수
+   │      참고: mbcico/openport.c의 closeport()
+   │      - close_serial_port()
+   │      - termios 원래 상태 복원
+   │
+   └─ □ 2.3 시그널 핸들러 설정
+          참고: mbcico/openport.c의 linedrop(), sigpipe()
+          - SIGHUP, SIGPIPE, SIGINT 처리
+
+□ PHASE 3: TTY I/O 모듈 (ttyio 기반)
+   ├─ □ 3.1 데이터 전송 함수
+   │      참고: mbcico/ttyio.c의 tty_put(), tty_putc()
+   │      - serial_write(fd, data, len)
+   │      - 전송 결과 확인 및 에러 처리
+   │
+   ├─ □ 3.2 데이터 수신 함수
+   │      참고: mbcico/ttyio.c의 tty_get(), tty_getc(), tty_read()
+   │      - serial_read(fd, buffer, size, timeout)
+   │      - select() 기반 타임아웃 처리
+   │      - 버퍼링 로직
+   │
+   ├─ □ 3.3 버퍼 플러시 함수
+   │      참고: mbcico/ttyio.c의 tty_flushin(), tty_flushout()
+   │      - serial_flush_input(fd)
+   │      - serial_flush_output(fd)
+   │      - tcflush() 사용
+   │
+   └─ □ 3.4 데이터 체크 함수
+          참고: mbcico/ttyio.c의 tty_check()
+          - serial_check_available(fd)
+          - select()로 데이터 가용성 확인
+
+□ PHASE 4: 모뎀 제어 모듈 (dial 기반)
+   ├─ □ 4.1 AT 명령 전송 및 응답 대기
+   │      참고: mbcico/chat.c, mbcico/dial.c의 initmodem()
+   │      - send_at_command(fd, command, timeout)
+   │      - 명령 전송 후 응답 라인 읽기
+   │      - "OK" 또는 "ERROR" 응답 파싱
+   │      - 화면에 명령 및 응답 출력
+   │
+   ├─ □ 4.2 모뎀 초기화 함수
+   │      참고: mbcico/dial.c의 initmodem()
+   │      - init_modem(fd)
+   │      - MODEM_INIT_COMMAND 파싱 (세미콜론 기준 분리)
+   │      - 각 명령어 순차 전송
+   │
+   ├─ □ 4.3 모뎀 자동응답 설정
+   │      - set_modem_autoanswer(fd)
+   │      - MODEM_AUTOANSWER_COMMAND 전송
+   │
+   └─ □ 4.4 모뎀 연결 해제
+          참고: mbcico/dial.c의 hangup()
+          - modem_hangup(fd)
+          - ATH 명령 전송 또는 DTR drop
+
+□ PHASE 5: RING 신호 모니터링 (answer 기반)
+   ├─ □ 5.1 시리얼 데이터 라인 읽기
+   │      참고: mbcico/answer.c의 answer()
+   │      - read_serial_line(fd, buffer, size, timeout)
+   │      - '\n' 또는 '\r' 까지 읽기
+   │      - 화면에 출력
+   │
+   ├─ □ 5.2 RING 문자열 감지
+   │      - detect_ring(line)
+   │      - strstr() 또는 strcmp()로 "RING" 검색
+   │      - RING 카운터 증가
+   │
+   └─ □ 5.3 RING 2회 감지 후 연결 처리
+          - 연결 플래그 설정
+          - "MODEM CONNECTION 시작" 메시지 출력
+
+□ PHASE 6: 타이머 및 지연 처리
+   ├─ □ 6.1 sleep/usleep 기반 지연
+   │      - delay_seconds(sec)
+   │      - 2초, 5초, 10초 지연 구현
+   │
+   └─ □ 6.2 타임아웃 처리 (선택사항)
+          참고: mbcico/ttyio.c의 timer 관련 함수들
+          - 정밀한 타이머가 필요한 경우
+
+□ PHASE 7: 메인 로직 통합
+   ├─ □ 7.1 프로그램 초기화
+   │      - 상수 정의 확인
+   │      - 변수 초기화
+   │
+   ├─ □ 7.2 시리얼 포트 열기 및 초기화
+   │      - open_serial_port() 호출
+   │      - 에러 처리 및 종료
+   │
+   ├─ □ 7.3 모뎀 초기화 명령 전송
+   │      - init_modem() 호출
+   │      - 응답 출력
+   │
+   ├─ □ 7.4 2초 대기
+   │      - sleep(2)
+   │
+   ├─ □ 7.5 자동응답 명령 전송
+   │      - set_modem_autoanswer() 호출
+   │      - 응답 출력
+   │
+   ├─ □ 7.6 2초 대기 후 모니터링 시작
+   │      - sleep(2)
+   │      - "시리얼 포트 모니터링 시작" 메시지
+   │
+   ├─ □ 7.7 RING 신호 대기 루프
+   │      - while (ring_count < 2)
+   │      - read_serial_line() 호출
+   │      - detect_ring() 호출
+   │      - 타임아웃 처리 (60초 정도)
+   │
+   ├─ □ 7.8 RING 2회 감지 시 연결 시작
+   │      - "MODEM CONNECTION 시작" 메시지
+   │
+   ├─ □ 7.9 10초 대기
+   │      - sleep(10)
+   │
+   ├─ □ 7.10 "first\n\r" 전송
+   │      - serial_write(fd, "first\n\r", 7)
+   │      - 전송 메시지 출력
+   │
+   ├─ □ 7.11 5초 대기
+   │      - sleep(5)
+   │
+   ├─ □ 7.12 "second\n\r" 전송
+   │      - serial_write(fd, "second\n\r", 8)
+   │      - 전송 메시지 출력
+   │
+   ├─ □ 7.13 모뎀 연결 해제
+   │      - modem_hangup() 호출
+   │      - "MODEM 연결 해제" 메시지
+   │
+   └─ □ 7.14 시리얼 포트 닫기 및 종료
+          - close_serial_port() 호출
+          - 프로그램 종료
+
+□ PHASE 8: 에러 처리 및 로깅
+   ├─ □ 8.1 에러 처리 매크로/함수
+   │      - 에러 메시지 출력
+   │      - 리소스 정리
+   │      - 종료 코드 반환
+   │
+   └─ □ 8.2 디버그 출력 (선택사항)
+          - verbose 모드 추가
+          - 상세한 데이터 흐름 출력
+
+□ PHASE 9: 테스트 및 디버깅
+   ├─ □ 9.1 컴파일 테스트
+   │      - make 실행
+   │      - 컴파일 에러 수정
+   │
+   ├─ □ 9.2 시리얼 포트 없이 테스트
+   │      - 가상 시리얼 포트 사용 (socat)
+   │      - 또는 /dev/null 테스트
+   │
+   ├─ □ 9.3 실제 모뎀 테스트
+   │      - /dev/ttyUSB0 연결 확인
+   │      - AT 명령 응답 확인
+   │      - RING 신호 시뮬레이션
+   │
+   └─ □ 9.4 종합 테스트
+          - 전체 시나리오 실행
+          - 타이밍 확인
+          - 에러 상황 테스트
+
+□ PHASE 10: 문서화 (선택사항)
+   ├─ □ 10.1 README.md 작성
+   │      - 프로그램 설명
+   │      - 빌드 방법
+   │      - 사용 방법
+   │
+   └─ □ 10.2 코드 주석 추가
+          - 함수 설명
+          - 주요 로직 설명
+
+===============================================================================
+[MBSE 소스 코드 활용 전략]
+===============================================================================
+
+직접 복사하여 사용할 부분:
+---------------------------
+1. termios 설정 코드 (openport.c의 tty_raw())
+   - c_cflag, c_iflag, c_oflag, c_lflag 설정
+   - 8N1 모드 설정 (CS8, ~PARENB, ~CSTOPB)
+   - baudrate 설정 (cfsetispeed/cfsetospeed)
+
+2. select() 기반 타임아웃 로직 (ttyio.c의 tty_read())
+   - FD_SET, FD_ZERO 사용
+   - 타임아웃 구조체 설정
+   - 에러 처리 로직
+
+3. read/write 에러 처리 (ttyio.c)
+   - EPIPE, ECONNRESET, EINTR 처리
+   - 반환값 확인
+
+단순화할 부분:
+--------------
+1. 타이머 시스템
+   - MBSE는 3개의 타이머 지원 → 우리는 단순 sleep() 사용
+
+2. 버퍼링 로직
+   - MBSE는 1KB 버퍼 사용 → 필요시 단순화
+
+3. 포트 잠금
+   - MBSE는 /var/lock/LCK.. 사용 → 선택사항
+
+4. 시그널 핸들링
+   - MBSE는 복잡한 시그널 처리 → 기본적인 정리만 수행
+
+생략할 부분:
+------------
+1. 노드리스트, 설정 파일 로딩
+2. 프로토콜 감지 (FTSC, YOOHOO, EMSI, BINKP)
+3. 파일 전송 프로토콜
+4. 히스토리 로깅
+5. TCP/IP 지원
+
+===============================================================================
+[개발 우선순위]
+===============================================================================
+
+High Priority (필수):
+- PHASE 2: Serial Port 초기화
+- PHASE 3: TTY I/O 기본 기능
+- PHASE 4: 모뎀 AT 명령 처리
+- PHASE 7: 메인 로직
+
+Medium Priority (중요):
+- PHASE 5: RING 신호 감지
+- PHASE 8: 에러 처리
+- PHASE 9: 테스트
+
+Low Priority (선택):
+- PHASE 6: 고급 타이머 (sleep()으로 충분)
+- PHASE 10: 문서화
+
+===============================================================================
+[예상 파일 구조]
+===============================================================================
+
+modem_sample/
+├── Makefile
+├── TODO.txt (이 파일)
+├── modem_sample.h       # 헤더 파일
+├── modem_sample.c       # 메인 프로그램
+├── serial_port.c        # 시리얼 포트 처리
+├── modem_control.c      # 모뎀 제어
+└── README.md           # 문서 (선택)
+
+또는 단일 파일로 통합:
+modem_sample/
+├── Makefile
+├── TODO.txt
+├── modem_sample.c       # 모든 기능 포함
+└── README.md
+
+===============================================================================
+[참고 사항]
+===============================================================================
+
+1. 터미널 속성 (termios):
+   - 8N1: 8 data bits, No parity, 1 stop bit
+   - c_cflag: CS8 | CREAD | HUPCL | CLOCAL
+   - c_iflag: 0 (no input processing)
+   - c_oflag: 0 (no output processing)
+   - c_lflag: 0 (non-canonical mode)
+
+2. AT 명령 포맷:
+   - 명령은 "AT"로 시작
+   - "\r" 또는 "\r\n"로 종료
+   - 응답: "OK\r\n" 또는 "ERROR\r\n"
+
+3. RING 감지:
+   - 모뎀은 "RING\r\n" 전송
+   - 연속적으로 2회 수신 확인
+
+4. 시리얼 데이터 형식:
+   - "\r\n" 라인 종료
+   - ASCII 텍스트
+
+5. 타이밍:
+   - AT 명령 응답: 일반적으로 1-5초
+   - RING 대기: 최대 60초 권장
+   - 명령 간 지연: 최소 100ms 권장
+
+===============================================================================
+[주의 사항]
+===============================================================================
+
+1. 시리얼 포트 권한:
+   - /dev/ttyUSB0는 root 또는 dialout 그룹 필요
+   - sudo 또는 사용자를 dialout 그룹에 추가
+
+2. 모뎀 설정:
+   - 모뎀이 /dev/ttyUSB0에 연결되어 있는지 확인
+   - dmesg | grep ttyUSB로 확인
+
+3. AT 명령 호환성:
+   - 모든 모뎀이 모든 AT 명령을 지원하지 않음
+   - 기본 명령 (ATZ, ATE0) 우선 테스트
+
+4. 버퍼 플러시:
+   - 명령 전송 전 입력 버퍼 플러시
+   - 응답 읽기 전 타임아웃 설정
+
+5. 리소스 정리:
+   - 시그널 핸들러에서 포트 닫기
+   - 에러 발생 시 정리 루틴 호출
+
+===============================================================================
+끝
+===============================================================================

@@ -1,0 +1,13 @@
+# Build artifacts
+*.o
+modem_sample
+
+# Editor and IDE files
+*~
+.*.swp
+.vscode/
+.idea/
+
+# Debug files
+*.log
+core

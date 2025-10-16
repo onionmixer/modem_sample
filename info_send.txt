@@ -1,0 +1,73 @@
+modem 접속 이후 클라이언트에게 최초 데이터를 전송하는 과정을 다음과 같이 정리했습니다:
+
+  주요 흐름
+
+  1. Modem 응답 처리
+
+  파일: mbcico/answer.c:53-118
+  - answer() 함수에서 modem 연결을 처리
+  - Line 73: carrier 플래그를 TRUE로 설정
+  - Line 113: rawport()로 포트를 raw 모드로 전환
+  - Line 117: session() 호출하여 통신 세션 시작
+
+  2. BBS 초기화 및 최초 데이터 전송
+
+  파일: mbsebbs/mbsebbs.c:85-407
+
+  주요 순서:
+  - Line 132-133: InitClient()로 서버와 연결 초기화
+  - Line 138-141: rawport()로 raw 모드 설정
+  - Line 143-174: 터미널 화면 크기 감지
+  - Line 258: clear() - 첫 데이터 전송: 화면 클리어 (ANSI 코드)
+  - Line 259: DisplayLogo() - 웰컴 로고 배너 전송
+  - Line 261-263: BBS 버전 및 저작권 정보 출력
+  - Line 396-408: 모뎀 연결 정보 표시 (CONNECT 문자열)
+
+  3. 웰컴 로고 출력
+
+  파일: mbsebbs/misc.c:113-134
+  void DisplayLogo()
+  - 언어별 디렉토리에서 CFG.welcome_logo 파일 로드
+  - PUTSTR()로 각 라인을 클라이언트에 전송
+
+  4. 사용자 로그인 및 추가 환영 화면
+
+  파일: mbsebbs/user.c:173-585
+
+  최초 로그인 시 표시되는 파일들 (Line 482-524):
+  - DisplayFile("mainlogo") - 메인 로고
+  - DisplayFile("welcome") - 환영 메시지
+  - 뉴스 활성화 시:
+    - welcome1 ~ welcome9 파일들
+    - 생일 메시지
+    - 보안 레벨별 파일
+    - 뉴스 파일
+
+  5. 핵심 출력 함수들
+
+  터미널 출력: mbsebbs/term.c
+  - clear() (Line 218): ANSI 클리어 스크린 코드 전송
+  - Enter() (Line 47): CR/LF 전송
+  - pout() (Line 70): 컬러 텍스트 전송
+  - PUTSTR() 매크로: 모든 문자열 출력
+
+  저수준 I/O: mbsebbs/ttyio.c:128-149
+  int tty_write(char *buf, int size)
+  {
+      result = write(1, buf, size);  // stdout으로 전송 (모뎀 포트)
+  }
+  - 모든 데이터는 file descriptor 1 (stdout)을 통해 전송됨
+
+  6. 전송 순서 요약
+
+  1. ANSI 화면 클리어 코드
+  2. 웰컴 로고 배너 (ASCII 아트)
+  3. BBS 이름, 버전, 저작권 정보
+  4. 연결 정보 (속도, 포트 등)
+  5. 메인 로고 화면
+  6. 환영 메시지 파일들
+  7. 뉴스/공지사항
+
+  모든 출력은 최종적으로 ttyio.c:128-149의 tty_write() 함수를 통해 file descriptor 1로 전송되며, 이는 모뎀 연결된
+  클라이언트로 직접 전달됩니다.
+
