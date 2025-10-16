@@ -181,42 +181,33 @@ int init_modem(int fd)
 
 /*
  * Set modem to autoanswer mode
+ * Supports both SOFTWARE (S0=0) and HARDWARE (S0=2) modes
  */
 int set_modem_autoanswer(int fd)
 {
     int rc;
+    const char *command;
 
-    print_message("Setting modem autoanswer...");
+#if MODEM_AUTOANSWER_MODE == 1
+    /* HARDWARE mode: Modem auto-answers after 2 rings */
+    command = MODEM_AUTOANSWER_HARDWARE_COMMAND;
+    print_message("Setting modem to HARDWARE autoanswer mode (S0=2)...");
+#else
+    /* SOFTWARE mode: Manual answer with ATA command */
+    command = MODEM_AUTOANSWER_SOFTWARE_COMMAND;
+    print_message("Setting modem to SOFTWARE autoanswer mode (S0=0)...");
+#endif
 
-    rc = send_command_string(fd, MODEM_AUTOANSWER_COMMAND, AT_COMMAND_TIMEOUT);
+    rc = send_command_string(fd, command, AT_COMMAND_TIMEOUT);
 
     if (rc == SUCCESS) {
-        print_message("Modem autoanswer set successfully");
+#if MODEM_AUTOANSWER_MODE == 1
+        print_message("Modem autoanswer set successfully - will auto-answer after 2 RINGs");
+#else
+        print_message("Modem autoanswer set successfully - manual ATA required");
+#endif
     } else {
         print_error("Failed to set modem autoanswer");
-    }
-
-    return rc;
-}
-
-/*
- * Answer incoming call (send ATA command)
- * Reference: mbcico/dial.c dialphone() and mbcico/answer.c answer()
- */
-int modem_answer(int fd)
-{
-    char response[BUFFER_SIZE];
-    int rc;
-
-    print_message("Answering incoming call (ATA)...");
-
-    /* Send ATA command with longer timeout for connection establishment */
-    rc = send_at_command(fd, "ATA", response, sizeof(response), AT_ANSWER_TIMEOUT);
-
-    if (rc == SUCCESS) {
-        print_message("Call answered successfully - Connection established");
-    } else {
-        print_error("Failed to answer call");
     }
 
     return rc;
@@ -277,19 +268,10 @@ int modem_hangup(int fd)
 
 /*
  * Detect RING in a line
- * Reference: mbcico/answer.c answer()
  */
 int detect_ring(const char *line)
 {
-    if (!line)
-        return 0;
-
-    /* Check for RING string */
-    if (strstr(line, "RING") != NULL) {
-        return 1;
-    }
-
-    return 0;
+    return (line && strstr(line, "RING") != NULL);
 }
 
 /*
@@ -326,7 +308,9 @@ int parse_connect_speed(const char *connect_str)
 }
 
 /*
- * Answer incoming call with speed adjustment
+ * Answer incoming call with speed detection (SOFTWARE mode only)
+ * Sends ATA command and parses CONNECT response to detect connection speed
+ * Used when MODEM_AUTOANSWER_MODE = 0 (SOFTWARE mode)
  */
 int modem_answer_with_speed_adjust(int fd, int *connected_speed)
 {

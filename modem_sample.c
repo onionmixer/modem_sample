@@ -88,9 +88,11 @@ void setup_signal_handlers(void)
 }
 
 /*
- * Wait for RING signal (2 times)
+ * Wait for RING signal and connection
+ * SOFTWARE mode (S0=0): Wait for 2 RINGs, then program sends ATA
+ * HARDWARE mode (S0=2): Wait for RING, modem auto-answers after 2 rings, wait for CONNECT
  */
-static int wait_for_ring(int fd, int timeout)
+static int wait_for_ring(int fd, int timeout, int *connected_speed)
 {
     char line_buf[LINE_BUFFER_SIZE];
     int ring_count = 0;
@@ -98,17 +100,29 @@ static int wait_for_ring(int fd, int timeout)
     int remaining_timeout;
     int rc;
 
+    /* Initialize connected_speed */
+    if (connected_speed) {
+        *connected_speed = -1;
+    }
+
     print_message("Starting serial port monitoring...");
-    print_message("Waiting for RING signal (need 2 times)...");
+
+#if MODEM_AUTOANSWER_MODE == 1
+    /* HARDWARE mode: Wait for RING, modem will auto-answer */
+    print_message("HARDWARE mode: Waiting for RING signal (modem will auto-answer after 2)...");
+#else
+    /* SOFTWARE mode: Wait for 2 RINGs to manually answer */
+    print_message("SOFTWARE mode: Waiting for RING signal (need 2 times for manual answer)...");
+#endif
 
     start_time = time(NULL);
 
-    while (ring_count < 2 && !interrupted) {
+    while (!interrupted) {
         current_time = time(NULL);
         remaining_timeout = timeout - (current_time - start_time);
 
         if (remaining_timeout <= 0) {
-            print_error("Timeout waiting for RING signal");
+            print_error("Timeout waiting for RING/CONNECT signal");
             return ERROR_TIMEOUT;
         }
 
@@ -126,17 +140,40 @@ static int wait_for_ring(int fd, int timeout)
         if (rc > 0) {
             print_message("Received: %s", line_buf);
 
-            /* Check for RING */
+#if MODEM_AUTOANSWER_MODE == 1
+            /* HARDWARE mode: Check for CONNECT (modem auto-answered) */
+            if (strstr(line_buf, "CONNECT") != NULL) {
+                print_message("Modem auto-answered and connected: %s", line_buf);
+
+                /* Parse connection speed from CONNECT response */
+                if (connected_speed) {
+                    int speed = parse_connect_speed(line_buf);
+                    if (speed > 0) {
+                        *connected_speed = speed;
+                    }
+                }
+
+                return SUCCESS;
+            }
+
+            /* Also count RINGs for logging */
+            if (detect_ring(line_buf)) {
+                ring_count++;
+                print_message("RING detected! (count: %d) - waiting for modem auto-answer...", ring_count);
+            }
+#else
+            /* SOFTWARE mode: Count RINGs for manual answer */
             if (detect_ring(line_buf)) {
                 ring_count++;
                 print_message("RING detected! (count: %d/2)", ring_count);
-            }
-        }
-    }
 
-    if (ring_count >= 2) {
-        print_message("RING signal detected 2 times - Ready to answer call");
-        return SUCCESS;
+                if (ring_count >= 2) {
+                    print_message("RING signal detected 2 times - Ready to answer call manually");
+                    return SUCCESS;
+                }
+            }
+#endif
+        }
     }
 
     return ERROR_TIMEOUT;
@@ -161,6 +198,11 @@ int main(int argc, char *argv[])
     printf("  Baudrate: %d\n", BAUDRATE);
     printf("  Data Bits: %d, Parity: NONE, Stop Bits: %d\n", BIT_DATA, BIT_STOP);
     printf("  Flow Control: NONE\n");
+#if MODEM_AUTOANSWER_MODE == 1
+    printf("  Autoanswer Mode: HARDWARE (S0=2, modem auto-answers)\n");
+#else
+    printf("  Autoanswer Mode: SOFTWARE (S0=0, manual ATA)\n");
+#endif
     printf("=======================================================\n\n");
 
     /* Setup signal handlers */
@@ -195,20 +237,35 @@ int main(int argc, char *argv[])
     print_message("Waiting 2 seconds...");
     sleep(2);
 
-    /* STEP 7: Monitor serial port for RING signal (2 times) */
-    rc = wait_for_ring(serial_fd, RING_WAIT_TIMEOUT);
+    /* STEP 7: Monitor serial port for RING signal and connection */
+    int connected_speed = -1;
+
+#if MODEM_AUTOANSWER_MODE == 1
+    /* HARDWARE mode: wait_for_ring() will wait for modem auto-answer and CONNECT */
+    print_message("HARDWARE mode: Waiting for modem to auto-answer...");
+    rc = wait_for_ring(serial_fd, RING_WAIT_TIMEOUT, &connected_speed);
+    if (rc != SUCCESS) {
+        print_error("Failed to detect RING/CONNECT signal");
+        goto cleanup;
+    }
+    print_message("Modem auto-answered successfully");
+#else
+    /* SOFTWARE mode: wait for 2 RINGs, then send ATA manually */
+    print_message("SOFTWARE mode: Waiting for RING signals...");
+    rc = wait_for_ring(serial_fd, RING_WAIT_TIMEOUT, NULL);
     if (rc != SUCCESS) {
         print_error("Failed to detect RING signal");
         goto cleanup;
     }
 
     /* STEP 8: Answer the call with speed detection (send ATA command) */
-    int connected_speed = -1;
+    print_message("Answering incoming call (ATA) with speed detection...");
     rc = modem_answer_with_speed_adjust(serial_fd, &connected_speed);
     if (rc != SUCCESS) {
         print_error("Failed to answer call");
         goto cleanup;
     }
+#endif
 
     /* STEP 8a: Dynamically adjust serial port speed to match actual connection speed */
     if (connected_speed > 0 && connected_speed != BAUDRATE) {

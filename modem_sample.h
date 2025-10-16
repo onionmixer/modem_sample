@@ -29,8 +29,12 @@
 
 /* Modem Commands */
 #define MODEM_INIT_COMMAND      "ATZ; AT&F Q0 V1 X4 &C1 &D2 S7=60 S10=120 S30=5"
-#define MODEM_AUTOANSWER_COMMAND "ATE0 S0=0"
+#define MODEM_AUTOANSWER_SOFTWARE_COMMAND "ATE0 S0=0"
+#define MODEM_AUTOANSWER_HARDWARE_COMMAND "ATE0 S0=2"
 #define MODEM_HANGUP_COMMAND    "ATH"
+
+/* Autoanswer Mode Configuration */
+#define MODEM_AUTOANSWER_MODE   1  /* 0=SOFTWARE (manual ATA), 1=HARDWARE (auto-answer after 2 rings) */
 
 /* Buffer Sizes */
 #define BUFFER_SIZE     1024
@@ -95,7 +99,6 @@ int wait_for_client_ready(int fd, const char *ready_string, int timeout);
 int send_at_command(int fd, const char *command, char *response, int resp_size, int timeout);
 int init_modem(int fd);
 int set_modem_autoanswer(int fd);
-int modem_answer(int fd);
 int modem_answer_with_speed_adjust(int fd, int *connected_speed);
 int modem_hangup(int fd);
 int detect_ring(const char *line);
