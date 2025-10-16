@@ -202,11 +202,26 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    /* STEP 8: Answer the call (send ATA command) */
-    rc = modem_answer(serial_fd);
+    /* STEP 8: Answer the call with speed detection (send ATA command) */
+    int connected_speed = -1;
+    rc = modem_answer_with_speed_adjust(serial_fd, &connected_speed);
     if (rc != SUCCESS) {
         print_error("Failed to answer call");
         goto cleanup;
+    }
+
+    /* STEP 8a: Dynamically adjust serial port speed to match actual connection speed */
+    if (connected_speed > 0 && connected_speed != BAUDRATE) {
+        print_message("Connection speed (%d bps) differs from configured speed (%d bps)",
+                      connected_speed, BAUDRATE);
+        print_message("Automatically adjusting to match modem connection speed...");
+        rc = adjust_serial_speed(serial_fd, connected_speed);
+        if (rc != SUCCESS) {
+            print_error("Failed to adjust serial port speed - continuing with original speed");
+            /* Continue with original speed - may cause communication issues */
+        }
+    } else if (connected_speed > 0) {
+        print_message("Connection speed matches configured speed: %d bps", connected_speed);
     }
 
     /* STEP 9: Enable carrier detect after connection */
@@ -220,14 +235,18 @@ int main(int argc, char *argv[])
     print_message("Connection established. Waiting 10 seconds...");
     sleep(10);
 
-    /* STEP 11: Send "first\n\r" using robust transmission */
+    /* Add extra delay to ensure client is ready */
+    print_message("Waiting additional 500ms for client stabilization...");
+    usleep(500000);  /* 500ms additional delay */
+
+    /* STEP 11: Send "first\r\n" using robust transmission */
     print_message("=== Sending 'first' message with improved transmission ===");
 
     /* Log what we're about to send */
-    log_transmission("FIRST", "first\n\r", 7);
+    log_transmission("FIRST", "first\r\n", 7);
 
     /* Use robust_serial_write with carrier checking and retry logic */
-    rc = robust_serial_write(serial_fd, "first\n\r", 7);
+    rc = robust_serial_write(serial_fd, "first\r\n", 7);
     if (rc < 0) {
         if (rc == ERROR_HANGUP) {
             print_error("Carrier lost while sending 'first' message");
@@ -251,14 +270,14 @@ int main(int argc, char *argv[])
     }
     print_message("Carrier OK - proceeding with second transmission");
 
-    /* STEP 13: Send "second\n\r" using robust transmission */
+    /* STEP 13: Send "second\r\n" using robust transmission */
     print_message("=== Sending 'second' message with improved transmission ===");
 
     /* Log what we're about to send */
-    log_transmission("SECOND", "second\n\r", 8);
+    log_transmission("SECOND", "second\r\n", 8);
 
     /* Use robust_serial_write with carrier checking and retry logic */
-    rc = robust_serial_write(serial_fd, "second\n\r", 8);
+    rc = robust_serial_write(serial_fd, "second\r\n", 8);
     if (rc < 0) {
         if (rc == ERROR_HANGUP) {
             print_error("Carrier lost while sending 'second' message");

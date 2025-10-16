@@ -76,8 +76,8 @@ int open_serial_port(const char *device, int baudrate)
     /* Input flags - disable all input processing */
     current_tios.c_iflag = 0;
 
-    /* Output flags - disable all output processing */
-    current_tios.c_oflag = 0;
+    /* Output flags - enable output processing with CR to CR-LF conversion */
+    current_tios.c_oflag = OPOST | ONLCR;
 
     /* Control flags - 8N1, enable receiver, hangup on close, local mode */
     current_tios.c_cflag &= ~(CSTOPB | PARENB | PARODD);
@@ -720,4 +720,48 @@ int wait_for_client_ready(int fd, const char *ready_string, int timeout)
 
     print_error("Timeout waiting for client ready signal");
     return ERROR_TIMEOUT;
+}
+
+/*
+ * Dynamically adjust serial port speed
+ * Used after CONNECT to match the actual modem connection speed
+ */
+int adjust_serial_speed(int fd, int new_baudrate)
+{
+    struct termios tios;
+    speed_t new_speed;
+    int rc;
+
+    if (fd < 0)
+        return ERROR_GENERAL;
+
+    print_message("Adjusting serial port speed to %d bps", new_baudrate);
+
+    /* Get current settings */
+    if ((rc = tcgetattr(fd, &tios)) < 0) {
+        print_error("tcgetattr failed: %s", strerror(errno));
+        return ERROR_PORT;
+    }
+
+    /* Convert baudrate to speed_t */
+    new_speed = get_baudrate(new_baudrate);
+
+    /* Set new speed */
+    cfsetispeed(&tios, new_speed);
+    cfsetospeed(&tios, new_speed);
+
+    /* Flush buffers before changing speed */
+    tcflush(fd, TCIOFLUSH);
+
+    /* Apply new settings */
+    if ((rc = tcsetattr(fd, TCSADRAIN, &tios)) < 0) {
+        print_error("tcsetattr failed: %s", strerror(errno));
+        return ERROR_PORT;
+    }
+
+    /* Wait a moment for speed change to take effect */
+    usleep(100000); /* 100ms */
+
+    print_message("Serial port speed adjusted to %d bps successfully", new_baudrate);
+    return SUCCESS;
 }

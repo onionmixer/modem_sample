@@ -291,3 +291,115 @@ int detect_ring(const char *line)
 
     return 0;
 }
+
+/*
+ * Parse CONNECT response to extract connection speed
+ * Examples: "CONNECT 1200", "CONNECT 2400/ARQ", "CONNECT 9600/V42"
+ */
+int parse_connect_speed(const char *connect_str)
+{
+    int speed = 0;
+    const char *ptr;
+
+    if (!connect_str)
+        return -1;
+
+    /* Find "CONNECT" */
+    ptr = strstr(connect_str, "CONNECT");
+    if (!ptr)
+        return -1;
+
+    /* Skip "CONNECT" and any spaces */
+    ptr += 7; /* length of "CONNECT" */
+    while (*ptr == ' ')
+        ptr++;
+
+    /* Extract the speed number */
+    if (sscanf(ptr, "%d", &speed) == 1) {
+        print_message("Parsed connection speed: %d bps", speed);
+        return speed;
+    }
+
+    /* If no speed specified, assume default (usually means 300 bps) */
+    print_message("No speed in CONNECT response, assuming 300 bps");
+    return 300;
+}
+
+/*
+ * Answer incoming call with speed adjustment
+ */
+int modem_answer_with_speed_adjust(int fd, int *connected_speed)
+{
+    char line_buf[LINE_BUFFER_SIZE];
+    int rc;
+    int speed = -1;
+    time_t start_time, current_time;
+    int remaining_timeout;
+
+    print_message("Answering incoming call (ATA) with speed detection...");
+
+    /* Flush input buffer before sending command */
+    serial_flush_input(fd);
+
+    /* Send ATA command */
+    rc = serial_write(fd, "ATA\r", 4);
+    if (rc < 0) {
+        print_error("Failed to send ATA command");
+        return ERROR_MODEM;
+    }
+
+    /* Wait for CONNECT response */
+    start_time = time(NULL);
+
+    while (1) {
+        current_time = time(NULL);
+        remaining_timeout = AT_ANSWER_TIMEOUT - (current_time - start_time);
+
+        if (remaining_timeout <= 0) {
+            print_error("Timeout waiting for modem response");
+            return ERROR_TIMEOUT;
+        }
+
+        rc = serial_read_line(fd, line_buf, sizeof(line_buf), remaining_timeout);
+
+        if (rc < 0) {
+            if (rc == ERROR_TIMEOUT) {
+                print_error("Timeout reading modem response");
+            }
+            return rc;
+        }
+
+        if (rc > 0) {
+            print_message("Received: %s", line_buf);
+
+            /* Check for CONNECT */
+            if (strstr(line_buf, "CONNECT") != NULL) {
+                print_message("Modem connected: %s", line_buf);
+
+                /* Parse speed from CONNECT response */
+                speed = parse_connect_speed(line_buf);
+                if (speed > 0 && connected_speed) {
+                    *connected_speed = speed;
+                }
+
+                return SUCCESS;
+            }
+
+            /* Check for errors */
+            if (strstr(line_buf, "NO CARRIER") != NULL) {
+                print_error("Connection failed: NO CARRIER");
+                return ERROR_MODEM;
+            }
+            if (strstr(line_buf, "BUSY") != NULL) {
+                print_error("Connection failed: BUSY");
+                return ERROR_MODEM;
+            }
+            if (strstr(line_buf, "NO ANSWER") != NULL) {
+                print_error("Connection failed: NO ANSWER");
+                return ERROR_MODEM;
+            }
+        }
+    }
+
+    return SUCCESS;
+}

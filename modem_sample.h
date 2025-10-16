@@ -21,14 +21,14 @@
 
 /* Configuration Constants */
 #define SERIAL_PORT     "/dev/ttyUSB0"
-#define BAUDRATE        9600
+#define BAUDRATE        4800  /* Changed from 9600 to match client */
 #define BIT_PARITY      0  /* NONE */
 #define BIT_DATA        8
 #define BIT_STOP        1
 #define FLOW_CONTROL    0  /* NONE */
 
 /* Modem Commands */
-#define MODEM_INIT_COMMAND      "ATZ; AT&F Q0 V1 X4 &C1 S7=60 S10=120 S30=5"
+#define MODEM_INIT_COMMAND      "ATZ; AT&F Q0 V1 X4 &C1 &D2 S7=60 S10=120 S30=5"
 #define MODEM_AUTOANSWER_COMMAND "ATE0 S0=0"
 #define MODEM_HANGUP_COMMAND    "ATH"
 
@@ -81,6 +81,7 @@ int enable_carrier_detect(int fd);
 int dtr_drop_hangup(int fd);
 int lock_port(const char *device);
 void unlock_port(void);
+int adjust_serial_speed(int fd, int new_baudrate);
 
 /* Enhanced Transmission Functions (from MBSE patterns) */
 int check_carrier_status(int fd);
@@ -95,8 +96,10 @@ int send_at_command(int fd, const char *command, char *response, int resp_size, 
 int init_modem(int fd);
 int set_modem_autoanswer(int fd);
 int modem_answer(int fd);
+int modem_answer_with_speed_adjust(int fd, int *connected_speed);
 int modem_hangup(int fd);
 int detect_ring(const char *line);
+int parse_connect_speed(const char *connect_str);
 
 /* Utility Functions */
 void print_message(const char *format, ...);
