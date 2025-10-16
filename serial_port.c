@@ -229,14 +229,24 @@ int serial_read(int fd, char *buffer, int size, int timeout)
 /*
  * Read a line from serial port (until \n or \r)
  * Useful for reading modem responses
+ *
+ * Improved version with internal buffering to handle fragmented data:
+ * - Uses static buffer to accumulate data across multiple reads
+ * - Reads data in larger chunks (up to 128 bytes at once)
+ * - Returns complete lines only when line terminator is found
+ * - Preserves incomplete data in buffer for next call
  */
 int serial_read_line(int fd, char *buffer, int size, int timeout)
 {
-    int pos = 0;
-    char c;
+    static char read_buffer[512];     /* Internal buffer for accumulating data */
+    static size_t buf_pos = 0;        /* Current position in read_buffer */
+    static size_t buf_len = 0;        /* Amount of data in read_buffer */
+
+    char chunk[128];                  /* Temporary buffer for reading chunks */
     time_t start_time, current_time;
     int remaining_timeout;
     int rc;
+    size_t i;
 
     if (fd < 0 || !buffer || size <= 0)
         return ERROR_GENERAL;
@@ -244,52 +254,124 @@ int serial_read_line(int fd, char *buffer, int size, int timeout)
     start_time = time(NULL);
     buffer[0] = '\0';
 
-    while (pos < size - 1) {
+    while (1) {
+        /* First, check if we have a complete line in the buffer */
+        for (i = buf_pos; i < buf_len; i++) {
+            char c = read_buffer[i];
+
+            /* Check for line terminators */
+            if (c == '\n' || c == '\r') {
+                /* Found line terminator - copy line to output buffer */
+                size_t copy_len = i - buf_pos;
+                if (copy_len > (size_t)(size - 1)) {
+                    copy_len = (size_t)(size - 1);
+                }
+
+                if (copy_len > 0) {
+                    memcpy(buffer, &read_buffer[buf_pos], copy_len);
+                }
+                buffer[copy_len] = '\0';
+
+                /* Skip the line terminator(s) */
+                buf_pos = i + 1;
+
+                /* Skip additional CR/LF if present */
+                while (buf_pos < buf_len &&
+                       (read_buffer[buf_pos] == '\r' || read_buffer[buf_pos] == '\n')) {
+                    buf_pos++;
+                }
+
+                /* If we consumed all buffered data, reset buffer */
+                if (buf_pos >= buf_len) {
+                    buf_pos = 0;
+                    buf_len = 0;
+                }
+
+                return (int)copy_len;
+            }
+        }
+
+        /* No complete line found - need to read more data */
         current_time = time(NULL);
         remaining_timeout = timeout - (current_time - start_time);
 
         if (remaining_timeout <= 0) {
-            buffer[pos] = '\0';
+            /* Timeout - return any partial data we have */
+            if (buf_len > buf_pos) {
+                size_t copy_len = buf_len - buf_pos;
+                if (copy_len > (size_t)(size - 1)) {
+                    copy_len = (size_t)(size - 1);
+                }
+                memcpy(buffer, &read_buffer[buf_pos], copy_len);
+                buffer[copy_len] = '\0';
+                buf_pos = 0;
+                buf_len = 0;
+                return ERROR_TIMEOUT;
+            }
             return ERROR_TIMEOUT;
         }
 
-        rc = serial_read(fd, &c, 1, remaining_timeout);
+        /* Compact buffer if needed (move remaining data to beginning) */
+        if (buf_pos > 0) {
+            if (buf_len > buf_pos) {
+                memmove(read_buffer, &read_buffer[buf_pos], buf_len - buf_pos);
+                buf_len -= buf_pos;
+            } else {
+                buf_len = 0;
+            }
+            buf_pos = 0;
+        }
+
+        /* Check if buffer is full without finding line terminator */
+        if (buf_len >= sizeof(read_buffer) - 1) {
+            /* Buffer overflow - return what we have and reset */
+            size_t copy_len = (buf_len > (size_t)(size - 1)) ? (size_t)(size - 1) : buf_len;
+            memcpy(buffer, read_buffer, copy_len);
+            buffer[copy_len] = '\0';
+            buf_pos = 0;
+            buf_len = 0;
+            return (int)copy_len;
+        }
+
+        /* Read more data into temporary chunk buffer */
+        rc = serial_read(fd, chunk, sizeof(chunk) - 1,
+                        (remaining_timeout > 1) ? 1 : remaining_timeout);
 
         if (rc < 0) {
-            buffer[pos] = '\0';
-            return rc;
-        } else if (rc == 0) {
-            continue;
-        }
-
-        /* Check for line terminators */
-        if (c == '\n' || c == '\r') {
-            buffer[pos] = '\0';
-            /* Skip additional \r or \n */
-            char next;
-            fd_set readfds;
-            struct timeval tv = {0, 10000}; /* 10ms */
-            FD_ZERO(&readfds);
-            FD_SET(fd, &readfds);
-            if (select(fd + 1, &readfds, NULL, NULL, &tv) > 0) {
-                if (read(fd, &next, 1) == 1) {
-                    if (next != '\n' && next != '\r') {
-                        /* Put back the character */
-                        if (pos < size - 1) {
-                            buffer[pos++] = next;
-                            buffer[pos] = '\0';
-                        }
+            /* Error during read */
+            if (rc != ERROR_TIMEOUT) {
+                /* Real error - return any buffered data or the error */
+                if (buf_len > buf_pos) {
+                    size_t copy_len = buf_len - buf_pos;
+                    if (copy_len > (size_t)(size - 1)) {
+                        copy_len = (size_t)(size - 1);
                     }
+                    memcpy(buffer, &read_buffer[buf_pos], copy_len);
+                    buffer[copy_len] = '\0';
+                    buf_pos = 0;
+                    buf_len = 0;
+                    return rc;
                 }
+                return rc;
             }
-            return pos;
-        }
+            /* Timeout on this read - continue loop to check overall timeout */
+            continue;
+        } else if (rc > 0) {
+            /* Got some data - append to buffer */
+            size_t space_left = sizeof(read_buffer) - buf_len;
+            size_t copy_len = ((size_t)rc > space_left) ? space_left : (size_t)rc;
 
-        buffer[pos++] = c;
+            if (copy_len > 0) {
+                memcpy(&read_buffer[buf_len], chunk, copy_len);
+                buf_len += copy_len;
+            }
+
+            /* Continue loop to check if we now have a complete line */
+        }
     }
 
-    buffer[pos] = '\0';
-    return pos;
+    /* Should never reach here */
+    return ERROR_GENERAL;
 }
 
 /*
