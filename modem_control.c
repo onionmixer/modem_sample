@@ -168,7 +168,7 @@ int init_modem(int fd)
 
     print_message("Initializing modem...");
 
-    rc = send_command_string(fd, MODEM_INIT_COMMAND, AT_COMMAND_TIMEOUT);
+    rc = send_command_string(fd, config.modem_init_command, config.at_command_timeout);
 
     if (rc == SUCCESS) {
         print_message("Modem initialized successfully");
@@ -188,24 +188,24 @@ int set_modem_autoanswer(int fd)
     int rc;
     const char *command;
 
-#if MODEM_AUTOANSWER_MODE == 1
-    /* HARDWARE mode: Modem auto-answers after 2 rings */
-    command = MODEM_AUTOANSWER_HARDWARE_COMMAND;
-    print_message("Setting modem to HARDWARE autoanswer mode (S0=2)...");
-#else
-    /* SOFTWARE mode: Manual answer with ATA command */
-    command = MODEM_AUTOANSWER_SOFTWARE_COMMAND;
-    print_message("Setting modem to SOFTWARE autoanswer mode (S0=0)...");
-#endif
+if (config.autoanswer_mode == 1) {
+        /* HARDWARE mode: Modem auto-answers after 2 rings */
+        command = config.modem_autoanswer_hardware_command;
+        print_message("Setting modem to HARDWARE autoanswer mode (S0=2)...");
+    } else {
+        /* SOFTWARE mode: Manual answer with ATA command */
+        command = config.modem_autoanswer_software_command;
+        print_message("Setting modem to SOFTWARE autoanswer mode (S0=0)...");
+    }
 
-    rc = send_command_string(fd, command, AT_COMMAND_TIMEOUT);
+    rc = send_command_string(fd, command, config.at_command_timeout);
 
     if (rc == SUCCESS) {
-#if MODEM_AUTOANSWER_MODE == 1
-        print_message("Modem autoanswer set successfully - will auto-answer after 2 RINGs");
-#else
-        print_message("Modem autoanswer set successfully - manual ATA required");
-#endif
+        if (config.autoanswer_mode == 1) {
+            print_message("Modem autoanswer set successfully - will auto-answer after 2 RINGs");
+        } else {
+            print_message("Modem autoanswer set successfully - manual ATA required");
+        }
     } else {
         print_error("Failed to set modem autoanswer");
     }
@@ -240,7 +240,7 @@ int modem_hangup(int fd)
     }
 
     /* Send ATH hangup command (may timeout if connection already dropped) */
-    rc = send_at_command(fd, MODEM_HANGUP_COMMAND, response, sizeof(response), 3);
+    rc = send_at_command(fd, config.modem_hangup_command, response, sizeof(response), 3);
 
     if (rc == SUCCESS) {
         print_message("ATH command successful");
@@ -277,34 +277,87 @@ int detect_ring(const char *line)
 /*
  * Parse CONNECT response to extract connection speed
  * Examples: "CONNECT 1200", "CONNECT 2400/ARQ", "CONNECT 9600/V42"
+ * Enhanced version with better error handling and logging
  */
 int parse_connect_speed(const char *connect_str)
 {
     int speed = 0;
     const char *ptr;
+    char temp_str[64];
 
-    if (!connect_str)
+    if (!connect_str) {
+        print_error("parse_connect_speed: connect_str is NULL");
         return -1;
+    }
+
+    /* Log the raw CONNECT response for debugging */
+    print_message("Parsing CONNECT response: '%s'", connect_str);
 
     /* Find "CONNECT" */
     ptr = strstr(connect_str, "CONNECT");
-    if (!ptr)
+    if (!ptr) {
+        print_error("No 'CONNECT' found in response string");
         return -1;
+    }
 
     /* Skip "CONNECT" and any spaces */
     ptr += 7; /* length of "CONNECT" */
-    while (*ptr == ' ')
+    while (*ptr == ' ' || *ptr == '\t')
         ptr++;
 
+    /* Copy the speed part for analysis */
+    strncpy(temp_str, ptr, sizeof(temp_str) - 1);
+    temp_str[sizeof(temp_str) - 1] = '\0';
+
+    /* Remove any trailing protocol information */
+    char *slash_pos = strchr(temp_str, '/');
+    if (slash_pos) {
+        *slash_pos = '\0';
+        print_message("Protocol detected: '%s'", slash_pos + 1);
+    }
+
+    /* Remove any trailing spaces or newlines */
+    char *end = temp_str + strlen(temp_str) - 1;
+    while (end > temp_str && (*end == ' ' || *end == '\r' || *end == '\n')) {
+        *end = '\0';
+        end--;
+    }
+
     /* Extract the speed number */
-    if (sscanf(ptr, "%d", &speed) == 1) {
-        print_message("Parsed connection speed: %d bps", speed);
+    if (sscanf(temp_str, "%d", &speed) == 1) {
+        print_message("Successfully parsed connection speed: %d bps", speed);
+
+        /* Validate speed is reasonable */
+        if (speed < 300 || speed > 115200) {
+            print_message("Warning: Unusual speed %d bps - may be incorrect", speed);
+        }
+
         return speed;
     }
 
-    /* If no speed specified, assume default (usually means 300 bps) */
-    print_message("No speed in CONNECT response, assuming 300 bps");
-    return 300;
+    /* Check for common CONNECT variations */
+    if (strlen(temp_str) == 0) {
+        print_message("CONNECT without speed - assuming 300 bps (legacy modem)");
+        return 300;
+    }
+
+    /* Try to extract from more complex formats */
+    if (strstr(temp_str, "1200")) speed = 1200;
+    else if (strstr(temp_str, "2400")) speed = 2400;
+    else if (strstr(temp_str, "4800")) speed = 4800;
+    else if (strstr(temp_str, "9600")) speed = 9600;
+    else if (strstr(temp_str, "19200")) speed = 19200;
+    else if (strstr(temp_str, "38400")) speed = 38400;
+    else if (strstr(temp_str, "57600")) speed = 57600;
+    else if (strstr(temp_str, "115200")) speed = 115200;
+
+    if (speed > 0) {
+        print_message("Extracted speed from complex format: %d bps", speed);
+        return speed;
+    }
+
+    print_error("Failed to parse speed from CONNECT response: '%s'", temp_str);
+    return -1;
 }
 
 /*
@@ -337,7 +390,7 @@ int modem_answer_with_speed_adjust(int fd, int *connected_speed)
 
     while (1) {
         current_time = time(NULL);
-        remaining_timeout = AT_ANSWER_TIMEOUT - (current_time - start_time);
+        remaining_timeout = config.at_answer_timeout - (current_time - start_time);
 
         if (remaining_timeout <= 0) {
             print_error("Timeout waiting for modem response");
@@ -386,4 +439,184 @@ int modem_answer_with_speed_adjust(int fd, int *connected_speed)
     }
 
     return SUCCESS;
+}
+
+/*
+ * Verify modem readiness for incoming calls
+ * Checks modem status and configuration before monitoring
+ */
+int verify_modem_readiness(int fd)
+{
+    char response[BUFFER_SIZE];
+    int rc;
+
+    if (fd < 0)
+        return ERROR_GENERAL;
+
+    print_message("Checking modem readiness...");
+
+    /* Check if modem is responsive */
+    rc = send_at_command(fd, "AT", response, sizeof(response), config.at_command_timeout);
+    if (rc != SUCCESS) {
+        print_error("Modem not responding to AT command");
+        return rc;
+    }
+
+    /* Check S0 register value */
+    rc = send_at_command(fd, "ATS0?", response, sizeof(response), config.at_command_timeout);
+    if (rc != SUCCESS) {
+        print_error("Failed to read S0 register");
+        return rc;
+    }
+
+    print_message("Modem S0 status: %s", response);
+
+    /* Verify modem is in proper state for auto-answer */
+    if (strstr(response, "0") == response) {
+        print_message("Warning: S0=0 (manual answer mode) detected");
+        print_message("For hardware auto-answer, S0 should be 2");
+    } else if (strstr(response, "2") == response) {
+        print_message("S0=2 confirmed - hardware auto-answer ready");
+    } else {
+        print_message("S0=%s detected - custom auto-answer ring count", response);
+    }
+
+    return SUCCESS;
+}
+
+/*
+ * Validate connection quality after establishment
+ * Monitors carrier signal and line quality
+ */
+int validate_connection_quality(int fd, int duration_seconds)
+{
+    time_t start_time;
+    int carrier_checks = 0;
+    int carrier_ok = 0;
+
+    if (fd < 0)
+        return ERROR_GENERAL;
+
+    print_message("Validating connection quality for %d seconds...", duration_seconds);
+
+    start_time = time(NULL);
+
+    while (!interrupted && (time(NULL) - start_time) < duration_seconds) {
+        /* Check carrier status */
+        int carrier = check_carrier_status(fd);
+        carrier_checks++;
+
+        if (carrier > 0) {
+            carrier_ok++;
+        } else if (carrier < 0) {
+            print_error("Failed to check carrier status during validation");
+            return ERROR_PORT;
+        } else {
+            print_error("Carrier lost during validation period");
+            return ERROR_HANGUP;
+        }
+
+        /* Check for any error indicators on the line */
+        if (serial_check_available(fd)) {
+            char error_buf[64];
+            int rc = serial_read(fd, error_buf, sizeof(error_buf) - 1, 0);
+            if (rc > 0) {
+                error_buf[rc] = '\0';
+                if (strstr(error_buf, "NO CARRIER") ||
+                    strstr(error_buf, "ERROR") ||
+                    strstr(error_buf, "DISCONNECT")) {
+                    print_error("Connection error during validation: %s", error_buf);
+                    return ERROR_MODEM;
+                }
+            }
+        }
+
+        sleep(1); /* Check every second */
+    }
+
+    /* Calculate carrier quality percentage */
+    if (carrier_checks > 0) {
+        int quality = (carrier_ok * 100) / carrier_checks;
+        print_message("Connection validation completed: %d%% carrier stability", quality);
+
+        if (quality < 90) {
+            print_message("Warning: Connection quality below optimal (%d%%)", quality);
+            return ERROR_MODEM; /* Not fatal, but indicates poor quality */
+        }
+    }
+
+    return SUCCESS;
+}
+
+/*
+ * Enhanced error recovery for modem issues
+ * Attempts to recover from common modem problems
+ */
+int recover_modem_error(int fd, int error_type)
+{
+    char response[BUFFER_SIZE];
+    int rc;
+    int retry_count = 0;
+
+    if (fd < 0)
+        return ERROR_GENERAL;
+
+    print_message("Attempting modem error recovery (type: %d)...", error_type);
+
+    while (retry_count < config.max_recovery_attempts && !interrupted) {
+        retry_count++;
+        print_message("Recovery attempt %d/%d", retry_count, config.max_recovery_attempts);
+
+        switch (error_type) {
+            case ERROR_MODEM:
+                /* Try to reset modem and reconfigure */
+                print_message("Resetting modem configuration...");
+                rc = send_at_command(fd, "ATZ", response, sizeof(response), 5);
+                if (rc == SUCCESS) {
+                    /* Re-apply auto-answer settings */
+                    rc = set_modem_autoanswer(fd);
+                    if (rc == SUCCESS) {
+                        print_message("Modem recovery successful");
+                        return SUCCESS;
+                    }
+                }
+                break;
+
+            case ERROR_TIMEOUT:
+                /* Try to clear any stuck conditions */
+                print_message("Clearing potential modem hang condition...");
+                serial_flush_input(fd);
+                serial_flush_output(fd);
+
+                /* Send carriage return to wake modem */
+                rc = serial_write(fd, "\r", 1);
+                if (rc < 0) {
+                    print_error("Failed to send wake-up character");
+                    return rc;
+                }
+
+                usleep(500000); /* Wait 500ms */
+
+                /* Check if modem responds */
+                rc = send_at_command(fd, "AT", response, sizeof(response), 3);
+                if (rc == SUCCESS) {
+                    print_message("Modem wake-up successful");
+                    return SUCCESS;
+                }
+                break;
+
+            default:
+                print_error("Unknown error type for recovery: %d", error_type);
+                return ERROR_GENERAL;
+        }
+
+        /* Wait before retry */
+        if (retry_count < 3) {
+            print_message("Waiting 2 seconds before retry...");
+            sleep(2);
+        }
+    }
+
+    print_error("Modem recovery failed after %d attempts", retry_count);
+    return ERROR_MODEM;
 }

@@ -9,7 +9,6 @@
 
 /* Global Variables */
 int serial_fd = -1;
-int verbose_mode = 1;
 volatile sig_atomic_t interrupted = 0;
 
 /*
@@ -94,9 +93,9 @@ void setup_signal_handlers(void)
  */
 static int wait_for_ring(int fd, int timeout, int *connected_speed)
 {
-    char line_buf[LINE_BUFFER_SIZE];
+    char line_buf[config.line_buffer_size];
     int ring_count = 0;
-    time_t start_time, current_time;
+    time_t start_time, current_time, last_ring_time = 0;
     int remaining_timeout;
     int rc;
 
@@ -105,15 +104,20 @@ static int wait_for_ring(int fd, int timeout, int *connected_speed)
         *connected_speed = -1;
     }
 
-    print_message("Starting serial port monitoring...");
+    if (config.enable_timing_log) {
+        print_message("Starting serial port monitoring...");
+    }
 
-#if MODEM_AUTOANSWER_MODE == 1
-    /* HARDWARE mode: Wait for RING, modem will auto-answer */
-    print_message("HARDWARE mode: Waiting for RING signal (modem will auto-answer after 2)...");
-#else
-    /* SOFTWARE mode: Wait for 2 RINGs to manually answer */
-    print_message("SOFTWARE mode: Waiting for RING signal (need 2 times for manual answer)...");
-#endif
+  if (config.autoanswer_mode == 1) {
+        /* HARDWARE mode: Wait for RING, modem will auto-answer */
+        print_message("HARDWARE mode: Waiting for RING signal (modem will auto-answer after 2 rings)...");
+        if (config.enable_timing_log) {
+            print_message("Enhanced logging: Tracking RING timing and modem response patterns");
+        }
+    } else {
+        /* SOFTWARE mode: Wait for 2 RINGs to manually answer */
+        print_message("SOFTWARE mode: Waiting for RING signal (need 2 times for manual answer)...");
+    }
 
     start_time = time(NULL);
 
@@ -122,12 +126,18 @@ static int wait_for_ring(int fd, int timeout, int *connected_speed)
         remaining_timeout = timeout - (current_time - start_time);
 
         if (remaining_timeout <= 0) {
-            print_error("Timeout waiting for RING/CONNECT signal");
+            print_error("Timeout waiting for RING/CONNECT signal after %d seconds", timeout);
+            return ERROR_TIMEOUT;
+        }
+
+        /* Additional timeout check if we've received RINGs but no CONNECT */
+        if (last_ring_time > 0 && (current_time - last_ring_time) > config.connect_timeout) {
+            print_error("Timeout: RINGs received but no CONNECT after %d seconds", config.connect_timeout);
             return ERROR_TIMEOUT;
         }
 
         /* Read line from serial port */
-        rc = serial_read_line(fd, line_buf, sizeof(line_buf), 5); /* 5 second timeout per read */
+        rc = serial_read_line(fd, line_buf, config.line_buffer_size, 5); /* 5 second timeout per read */
 
         if (rc == ERROR_TIMEOUT) {
             /* Continue waiting */
@@ -140,39 +150,85 @@ static int wait_for_ring(int fd, int timeout, int *connected_speed)
         if (rc > 0) {
             print_message("Received: %s", line_buf);
 
-#if MODEM_AUTOANSWER_MODE == 1
-            /* HARDWARE mode: Check for CONNECT (modem auto-answered) */
-            if (strstr(line_buf, "CONNECT") != NULL) {
-                print_message("Modem auto-answered and connected: %s", line_buf);
-
-                /* Parse connection speed from CONNECT response */
-                if (connected_speed) {
-                    int speed = parse_connect_speed(line_buf);
-                    if (speed > 0) {
-                        *connected_speed = speed;
+            if (config.autoanswer_mode == 1) {
+                /* HARDWARE mode: Enhanced CONNECT detection with detailed logging */
+                if (strstr(line_buf, "CONNECT") != NULL) {
+                    int elapsed_time = current_time - start_time;
+                    print_message("=== MODEM AUTO-ANSWER DETECTED ===");
+                    print_message("CONNECT response: %s", line_buf);
+                    if (config.enable_timing_log) {
+                        print_message("Total time from start: %d seconds", elapsed_time);
+                        print_message("RING count received: %d", ring_count);
                     }
-                }
 
-                return SUCCESS;
-            }
+                    /* Parse connection speed from CONNECT response */
+                    if (connected_speed) {
+                        int speed = parse_connect_speed(line_buf);
+                        if (speed > 0) {
+                            *connected_speed = speed;
+                            print_message("Detected connection speed: %d bps", speed);
+                        } else {
+                            print_message("Warning: Could not parse speed from CONNECT response");
+                        }
+                    }
 
-            /* Also count RINGs for logging */
-            if (detect_ring(line_buf)) {
-                ring_count++;
-                print_message("RING detected! (count: %d) - waiting for modem auto-answer...", ring_count);
-            }
-#else
-            /* SOFTWARE mode: Count RINGs for manual answer */
-            if (detect_ring(line_buf)) {
-                ring_count++;
-                print_message("RING detected! (count: %d/2)", ring_count);
-
-                if (ring_count >= 2) {
-                    print_message("RING signal detected 2 times - Ready to answer call manually");
+                    print_message("Hardware auto-answer sequence completed successfully");
                     return SUCCESS;
                 }
+
+                /* Enhanced RING detection with timing analysis */
+                if (detect_ring(line_buf)) {
+                    ring_count++;
+                    current_time = time(NULL);
+
+                    if (last_ring_time == 0) {
+                        if (config.enable_timing_log) {
+                            print_message("=== FIRST RING DETECTED ===");
+                            print_message("RING #%d at %ld seconds from start", ring_count, current_time - start_time);
+                            print_message("Modem should auto-answer after RING #2 (S0=2)");
+                        }
+                    } else {
+                        int ring_interval = current_time - last_ring_time;
+                        if (config.enable_timing_log) {
+                            print_message("RING #%d detected (interval: %d seconds from previous RING)",
+                                         ring_count, ring_interval);
+
+                            if (ring_count == 2) {
+                                print_message("=== SECOND RING DETECTED ===");
+                                print_message("Modem should auto-answer NOW (S0=2 configuration)");
+                                print_message("Waiting for CONNECT response...");
+                            }
+                        }
+                    }
+
+                    last_ring_time = current_time;
+                }
+
+                /* Enhanced detection of potential connection issues */
+                if (strstr(line_buf, "NO CARRIER") != NULL) {
+                    print_error("Connection lost during ringing phase: %s", line_buf);
+                    return ERROR_MODEM;
+                }
+                if (strstr(line_buf, "BUSY") != NULL) {
+                    print_error("Line busy during ringing phase: %s", line_buf);
+                    return ERROR_MODEM;
+                }
+                if (strstr(line_buf, "ERROR") != NULL) {
+                    print_error("Modem error during ringing phase: %s", line_buf);
+                    return ERROR_MODEM;
+                }
+            } else {
+                /* SOFTWARE mode: Count RINGs for manual answer */
+                if (detect_ring(line_buf)) {
+                    ring_count++;
+                    print_message("RING detected! (count: %d/2)", ring_count);
+
+                    if (ring_count >= 2) {
+                        print_message("RING signal detected 2 times - Ready to answer call manually");
+                        return SUCCESS;
+                    }
+                }
             }
-#endif
         }
     }
 
@@ -194,83 +250,150 @@ int main(int argc, char *argv[])
     printf("Modem Sample Program\n");
     printf("=======================================================\n");
     printf("Configuration:\n");
-    printf("  Serial Port: %s\n", SERIAL_PORT);
-    printf("  Baudrate: %d\n", BAUDRATE);
-    printf("  Data Bits: %d, Parity: NONE, Stop Bits: %d\n", BIT_DATA, BIT_STOP);
-    printf("  Flow Control: NONE\n");
-#if MODEM_AUTOANSWER_MODE == 1
-    printf("  Autoanswer Mode: HARDWARE (S0=2, modem auto-answers)\n");
-#else
-    printf("  Autoanswer Mode: SOFTWARE (S0=0, manual ATA)\n");
-#endif
+    printf("  Serial Port: %s\n", config.serial_port);
+    printf("  Baudrate: %d\n", config.baudrate);
+    printf("  Data Bits: %d, Parity: %s, Stop Bits: %d\n", config.data_bits, config.parity, config.stop_bits);
+    printf("  Flow Control: %s\n", config.flow_control);
+    if (config.autoanswer_mode == 1) {
+        printf("  Autoanswer Mode: HARDWARE (S0=2, modem auto-answers)\n");
+    } else {
+        printf("  Autoanswer Mode: SOFTWARE (S0=0, manual ATA)\n");
+    }
     printf("=======================================================\n\n");
 
     /* Setup signal handlers */
     setup_signal_handlers();
 
-    /* STEP 1-2: Open and initialize serial port */
-    serial_fd = open_serial_port(SERIAL_PORT, BAUDRATE);
+    /* STEP 1: Load configuration */
+    const char *config_file = "modem_sample.conf";
+    rc = load_config(config_file);
+    if (rc != SUCCESS) {
+        print_message("Using default configuration");
+        init_default_config();
+    }
+
+    if (config.verbose_mode) {
+        print_config();
+    }
+
+    /* STEP 2-3: Open and initialize serial port */
+    serial_fd = open_serial_port(config.serial_port, config.baudrate);
     if (serial_fd < 0) {
         print_error("Failed to open serial port");
         return 1;
     }
 
-    /* STEP 3: Send modem initialization command */
+    /* STEP 4: Send modem initialization command */
     rc = init_modem(serial_fd);
     if (rc != SUCCESS) {
         print_error("Modem initialization failed");
         goto cleanup;
     }
 
-    /* STEP 4: Wait 2 seconds */
+    /* STEP 5: Wait 2 seconds */
     print_message("Waiting 2 seconds...");
     sleep(2);
 
-    /* STEP 5: Send modem autoanswer command */
+    /* STEP 6: Send modem autoanswer command */
     rc = set_modem_autoanswer(serial_fd);
     if (rc != SUCCESS) {
         print_error("Failed to set modem autoanswer");
         goto cleanup;
     }
 
-    /* STEP 6: Wait 2 seconds */
+    /* STEP 7: Wait 2 seconds */
     print_message("Waiting 2 seconds...");
     sleep(2);
 
     /* STEP 7: Monitor serial port for RING signal and connection */
     int connected_speed = -1;
 
-#if MODEM_AUTOANSWER_MODE == 1
-    /* HARDWARE mode: wait_for_ring() will wait for modem auto-answer and CONNECT */
-    print_message("HARDWARE mode: Waiting for modem to auto-answer...");
-    rc = wait_for_ring(serial_fd, RING_WAIT_TIMEOUT, &connected_speed);
-    if (rc != SUCCESS) {
-        print_error("Failed to detect RING/CONNECT signal");
-        goto cleanup;
-    }
-    print_message("Modem auto-answered successfully");
-#else
-    /* SOFTWARE mode: wait for 2 RINGs, then send ATA manually */
-    print_message("SOFTWARE mode: Waiting for RING signals...");
-    rc = wait_for_ring(serial_fd, RING_WAIT_TIMEOUT, NULL);
-    if (rc != SUCCESS) {
-        print_error("Failed to detect RING signal");
-        goto cleanup;
-    }
+    if (config.autoanswer_mode == 1) {
+        /* HARDWARE mode: Enhanced auto-answer monitoring with validation */
+        print_message("=== HARDWARE AUTO-ANSWER MODE ===");
+        print_message("S0=2: Modem will automatically answer after 2 RINGs");
+        print_message("Monitoring: RING timing, modem response, and CONNECT detection");
 
-    /* STEP 8: Answer the call with speed detection (send ATA command) */
-    print_message("Answering incoming call (ATA) with speed detection...");
-    rc = modem_answer_with_speed_adjust(serial_fd, &connected_speed);
-    if (rc != SUCCESS) {
-        print_error("Failed to answer call");
-        goto cleanup;
+        /* Pre-connection validation */
+        print_message("Validating modem readiness before monitoring...");
+        rc = verify_modem_readiness(serial_fd);
+        if (rc != SUCCESS) {
+            print_error("Modem not ready for incoming calls");
+            goto cleanup;
+        }
+
+        print_message("Modem ready - Starting enhanced RING/CONNECT monitoring...");
+        rc = wait_for_ring(serial_fd, config.ring_wait_timeout, &connected_speed);
+        if (rc != SUCCESS) {
+            if (rc == ERROR_TIMEOUT) {
+                print_error("Timeout: No RING/CONNECT detected within %d seconds", config.ring_wait_timeout);
+                print_message("Possible causes:");
+                print_message("  - No incoming calls received");
+                print_message("  - Modem S0 register not properly set to 2");
+                print_message("  - Serial port communication issues");
+                print_message("  - Caller hung up before 2nd RING");
+
+                /* Attempt error recovery */
+                print_message("Attempting recovery from timeout condition...");
+                rc = recover_modem_error(serial_fd, ERROR_TIMEOUT);
+                if (rc == SUCCESS) {
+                    print_message("Recovery successful - you may try again");
+                }
+            } else if (rc == ERROR_MODEM) {
+                print_error("Modem error during auto-answer sequence");
+                print_message("Check modem configuration and phone line connection");
+
+                /* Attempt error recovery */
+                print_message("Attempting modem error recovery...");
+                rc = recover_modem_error(serial_fd, ERROR_MODEM);
+                if (rc == SUCCESS) {
+                    print_message("Modem recovery successful - you may try again");
+                }
+            } else {
+                print_error("Failed to detect RING/CONNECT signal (error: %d)", rc);
+
+                /* Attempt general error recovery */
+                print_message("Attempting general error recovery...");
+                rc = recover_modem_error(serial_fd, rc);
+                if (rc == SUCCESS) {
+                    print_message("Recovery successful - you may try again");
+                }
+            }
+            goto cleanup;
+        }
+
+        /* Post-connection validation */
+        print_message("=== AUTO-ANSWER SUCCESSFUL ===");
+        if (config.enable_connection_validation) {
+            print_message("Validating connection stability...");
+            rc = validate_connection_quality(serial_fd, config.validation_duration);
+            if (rc != SUCCESS) {
+                print_error("Connection validation failed - connection may be unstable");
+                print_message("Continuing anyway, but data transmission may fail");
+            }
+        }
+    } else {
+        /* SOFTWARE mode: wait for 2 RINGs, then send ATA manually */
+        print_message("SOFTWARE mode: Waiting for RING signals...");
+        rc = wait_for_ring(serial_fd, config.ring_wait_timeout, NULL);
+        if (rc != SUCCESS) {
+            print_error("Failed to detect RING signal");
+            goto cleanup;
+        }
+
+        /* STEP 8: Answer the call with speed detection (send ATA command) */
+        print_message("Answering incoming call (ATA) with speed detection...");
+        rc = modem_answer_with_speed_adjust(serial_fd, &connected_speed);
+        if (rc != SUCCESS) {
+            print_error("Failed to answer call");
+            goto cleanup;
+        }
     }
-#endif
 
     /* STEP 8a: Dynamically adjust serial port speed to match actual connection speed */
-    if (connected_speed > 0 && connected_speed != BAUDRATE) {
+    if (connected_speed > 0 && connected_speed != config.baudrate) {
         print_message("Connection speed (%d bps) differs from configured speed (%d bps)",
-                      connected_speed, BAUDRATE);
+                      connected_speed, config.baudrate);
         print_message("Automatically adjusting to match modem connection speed...");
         rc = adjust_serial_speed(serial_fd, connected_speed);
         if (rc != SUCCESS) {
@@ -282,10 +405,12 @@ int main(int argc, char *argv[])
     }
 
     /* STEP 9: Enable carrier detect after connection */
-    rc = enable_carrier_detect(serial_fd);
-    if (rc != SUCCESS) {
-        print_message("Warning: Failed to enable carrier detect");
-        /* Continue anyway - not fatal */
+    if (config.enable_carrier_detect) {
+        rc = enable_carrier_detect(serial_fd);
+        if (rc != SUCCESS) {
+            print_message("Warning: Failed to enable carrier detect");
+            /* Continue anyway - not fatal */
+        }
     }
 
     /* STEP 10: Wait 10 seconds after connection */
@@ -300,7 +425,9 @@ int main(int argc, char *argv[])
     print_message("=== Sending 'first' message with improved transmission ===");
 
     /* Log what we're about to send */
-    log_transmission("FIRST", "first\r\n", 7);
+    if (config.enable_transmission_log) {
+        log_transmission("FIRST", "first\r\n", 7);
+    }
 
     /* Use robust_serial_write with carrier checking and retry logic */
     rc = robust_serial_write(serial_fd, "first\r\n", 7);
@@ -331,7 +458,9 @@ int main(int argc, char *argv[])
     print_message("=== Sending 'second' message with improved transmission ===");
 
     /* Log what we're about to send */
-    log_transmission("SECOND", "second\r\n", 8);
+    if (config.enable_transmission_log) {
+        log_transmission("SECOND", "second\r\n", 8);
+    }
 
     /* Use robust_serial_write with carrier checking and retry logic */
     rc = robust_serial_write(serial_fd, "second\r\n", 8);

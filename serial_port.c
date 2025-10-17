@@ -238,7 +238,7 @@ int serial_read(int fd, char *buffer, int size, int timeout)
  */
 int serial_read_line(int fd, char *buffer, int size, int timeout)
 {
-    static char read_buffer[512];     /* Internal buffer for accumulating data */
+    static char read_buffer[2048];     /* Internal buffer for accumulating data */
     static size_t buf_pos = 0;        /* Current position in read_buffer */
     static size_t buf_len = 0;        /* Amount of data in read_buffer */
 
@@ -643,7 +643,7 @@ int robust_serial_write(int fd, const char *data, int len)
         return ERROR_HANGUP;
     }
 
-    while (sent < len && retry < MAX_WRITE_RETRY) {
+    while (sent < len && retry < config.max_write_retry) {
         rc = write(fd, data + sent, len - sent);
 
         if (rc < 0) {
@@ -655,8 +655,8 @@ int robust_serial_write(int fd, const char *data, int len)
 
             /* Retry on temporary errors */
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                print_message("Write would block, retry %d/%d", retry + 1, MAX_WRITE_RETRY);
-                usleep(RETRY_DELAY_US);
+                print_message("Write would block, retry %d/%d", retry + 1, config.max_write_retry);
+                usleep(config.retry_delay_us);
                 retry++;
                 continue;
             }
@@ -678,7 +678,7 @@ int robust_serial_write(int fd, const char *data, int len)
 
     if (sent < len) {
         print_error("Failed to send all data after %d retries: sent %d of %d bytes",
-                    MAX_WRITE_RETRY, sent, len);
+                    config.max_write_retry, sent, len);
         return ERROR_GENERAL;
     }
 
@@ -702,11 +702,11 @@ int buffered_serial_send(int fd, const char *data, int len)
     if (fd < 0 || !data || len <= 0)
         return ERROR_GENERAL;
 
-    print_message("Buffered send: %d bytes in chunks of %d", len, TX_CHUNK_SIZE);
+    print_message("Buffered send: %d bytes in chunks of %d", len, config.tx_chunk_size);
 
     while (sent < len) {
         /* Calculate chunk size */
-        chunk_size = (len - sent > TX_CHUNK_SIZE) ? TX_CHUNK_SIZE : (len - sent);
+        chunk_size = (len - sent > config.tx_chunk_size) ? config.tx_chunk_size : (len - sent);
 
         /* Send chunk using robust write */
         rc = robust_serial_write(fd, data + sent, chunk_size);
@@ -720,11 +720,11 @@ int buffered_serial_send(int fd, const char *data, int len)
 
         /* Delay between chunks to avoid overwhelming receiver */
         if (sent < len) {
-            usleep(TX_CHUNK_DELAY_US);
+            usleep(config.tx_chunk_delay_us);
         }
 
         /* Progress indicator for large transfers */
-        if (len > TX_CHUNK_SIZE * 4) {  /* Only for large transfers */
+        if (len > config.tx_chunk_size * 4) {  /* Only for large transfers */
             print_message("Progress: %d/%d bytes (%.1f%%)",
                          sent, len, (100.0 * sent) / len);
         }

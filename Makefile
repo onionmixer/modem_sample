@@ -9,7 +9,7 @@ LDFLAGS =
 TARGET = modem_sample
 
 # Source files
-SOURCES = modem_sample.c serial_port.c modem_control.c
+SOURCES = modem_sample.c serial_port.c modem_control.c config.c
 OBJECTS = $(SOURCES:.c=.o)
 HEADERS = modem_sample.h
 
