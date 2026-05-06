@@ -115,12 +115,17 @@ int modem_connect(int fd, const char* phone_number) {
 int modem_send_command(int fd, const char* command, char* response, size_t response_len) {
     char buffer[256];
     ssize_t n;
-    int retries = 3;
     const char* terminator = "\r";
     
     // Send command
-    write(fd, command, strlen(command));
-    write(fd, terminator, strlen(terminator));
+    if (write(fd, command, strlen(command)) < 0) {
+        perror("Error writing modem command");
+        return -1;
+    }
+    if (write(fd, terminator, strlen(terminator)) < 0) {
+        perror("Error writing modem command terminator");
+        return -1;
+    }
     
     // Wait for response
     usleep(100000);
@@ -162,4 +167,35 @@ void modem_cleanup(int fd) {
     if (fd >= 0) {
         close(fd);
     }
+}
+
+int main(int argc, char *argv[]) {
+    int fd;
+    const char *device_path;
+    const char *phone_number;
+
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "Usage: %s <serial-device> [phone-number]\n", argv[0]);
+        return 1;
+    }
+
+    device_path = argv[1];
+    phone_number = argc == 3 ? argv[2] : NULL;
+
+    fd = modem_init(device_path);
+    if (fd < 0) {
+        return 1;
+    }
+
+    if (phone_number != NULL && modem_connect(fd, phone_number) != 0) {
+        modem_cleanup(fd);
+        return 1;
+    }
+
+    if (phone_number != NULL) {
+        modem_disconnect(fd);
+    }
+
+    modem_cleanup(fd);
+    return 0;
 }

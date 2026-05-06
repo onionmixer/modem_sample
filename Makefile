@@ -2,14 +2,14 @@
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c99
+CFLAGS = -Wall -Wextra -O2 -std=c99 -D_DEFAULT_SOURCE
 LDFLAGS =
 
 # Target executable
 TARGET = modem_sample
 
 # Source files
-SOURCES = modem_sample.c serial_port.c modem_control.c config.c
+SOURCES = modem_sample.c
 OBJECTS = $(SOURCES:.c=.o)
 HEADERS = modem_sample.h
 
